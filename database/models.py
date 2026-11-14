@@ -3,6 +3,7 @@ import sqlite3
 import json
 from pathlib import Path
 import hashlib
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_DB_PATH = Path("database/threatlens.db")
 
@@ -20,20 +21,16 @@ def get_connection(db_path=DEFAULT_DB_PATH):
 
 
 def initialize_db(db_path=DEFAULT_DB_PATH):
-    """Create the events table and indexes if they don't exist."""
+    """Create the events, alerts, and indicator cache tables and indexes."""
 
     with get_connection(db_path) as connection:
-
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS events (
-
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                 timestamp TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 source TEXT NOT NULL,
                 host TEXT NOT NULL,
-
                 username TEXT,
                 source_ip TEXT,
                 destination_ip TEXT,
@@ -42,19 +39,17 @@ def initialize_db(db_path=DEFAULT_DB_PATH):
                 status TEXT,
                 fingerprint TEXT UNIQUE NOT NULL,
                 raw_event TEXT NOT NULL,
-
                 ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE INDEX IF NOT EXISTS idx_event_timestamp
-            ON events(timestamp);
+                ON events(timestamp);
 
             CREATE INDEX IF NOT EXISTS idx_event_type
-            ON events(event_type);
+                ON events(event_type);
 
             CREATE INDEX IF NOT EXISTS idx_event_source_ip
-            ON events(source_ip);
-
+                ON events(source_ip);
 
             CREATE TABLE IF NOT EXISTS alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,7 +70,17 @@ def initialize_db(db_path=DEFAULT_DB_PATH):
                 enrichment_json TEXT,
                 status TEXT NOT NULL DEFAULT 'open',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+            );
+
+            CREATE TABLE IF NOT EXISTS indicator_cache (
+                indicator TEXT NOT NULL,
+                indicator_type TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                cached_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (indicator, indicator_type, provider)
+            );
         """)
 
 
@@ -227,7 +232,10 @@ def save_alerts(alerts, db_path):
             mitre.get("technique_id"),
             mitre.get("technique"),
             json.dumps(evidence),
-            json.dumps(alert.get("threat_intelligence"))
+            json.dumps({
+                "local": alert.get("threat_intelligence"),
+               "external": alert.get("external_intelligence")
+})
         ))
 
     try:
@@ -238,24 +246,98 @@ def save_alerts(alerts, db_path):
 
 
 
-def get_alerts(db_path):
-    connection = get_connection(db_path)
 
-    try:
+def get_alerts(db_path=DEFAULT_DB_PATH):
+    with get_connection(db_path) as connection:
         rows = connection.execute(
             "SELECT * FROM alerts ORDER BY created_at DESC"
         ).fetchall()
 
-        results = []
+    alerts = []
 
-        for row in rows:
-            alert = dict(row)
-            alert["evidence"] = json.loads(alert.pop("evidence_json"))
-            alert["threat_intelligence"] = json.loads(
-                alert.pop("enrichment_json")
+    for row in rows:
+        alert = dict(row)
+
+        alert["evidence"] = json.loads(
+            alert.pop("evidence_json") or "[]"
+        )
+
+        alert["enrichment_json"] = json.loads(
+            alert.get("enrichment_json") or "null"
+        )
+
+        alerts.append(alert)
+
+    return alerts
+
+
+        
+def get_cached_enrichment(
+    indicator,
+    indicator_type,
+    provider,
+    db_path=DEFAULT_DB_PATH
+):
+    """Retrieve an unexpired intelligence result from SQLite."""
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with get_connection(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT data_json
+            FROM indicator_cache
+            WHERE indicator = ?
+              AND indicator_type = ?
+              AND provider = ?
+              AND expires_at > ?
+            """,
+            (indicator, indicator_type, provider, now)
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return json.loads(row["data_json"])
+
+
+def save_cached_enrichment(
+    indicator,
+    indicator_type,
+    provider,
+    data,
+    db_path=DEFAULT_DB_PATH,
+    ttl_hours=24
+):
+    """Store successful intelligence results with an expiry time."""
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=ttl_hours)
+
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO indicator_cache (
+                indicator,
+                indicator_type,
+                provider,
+                data_json,
+                cached_at,
+                expires_at
             )
-            results.append(alert)
-
-        return results
-    finally:
-        connection.close()
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(indicator, indicator_type, provider)
+            DO UPDATE SET
+                data_json = excluded.data_json,
+                cached_at = excluded.cached_at,
+                expires_at = excluded.expires_at
+            """,
+            (
+                indicator,
+                indicator_type,
+                provider,
+                json.dumps(data),
+                now.isoformat(),
+                expires_at.isoformat()
+            )
+        )
