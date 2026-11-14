@@ -1,0 +1,18 @@
+
+id: TL-003
+name: Connection to Known Malicious IP
+description: >
+  Detects outbound network connections matching
+  known malicious IP indicators.
+
+severity: high
+
+mitre_attack:
+  tactic: Command and Control
+  technique_id: null
+  technique: Requires further investigation
+
+detection:
+  event_type: network_connection
+  indicator_field: destination_ip
+  indicator_source: local_ioc_list

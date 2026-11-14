@@ -1,0 +1,5 @@
+
+{"timestamp":"2026-11-14T10:30:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-01","username":"admin","source_ip":"192.0.2.15","status":"failed"}
+{"timestamp":"2026-11-14T10:31:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-01","username":"admin","source_ip":"192.0.2.15","status":"failed"}
+{"timestamp":"2026-11-14T10:35:00Z","event_type":"process_execution","source":"sysmon","host":"WORKSTATION-01","username":"admin","process":"powershell.exe","command_line":"powershell.exe -EncodedCommand VwByAGkAdABlAC0ASABvAHMAdAAgAEgAZQBsAGwAbwA="}
+{"timestamp":"2026-11-14T10:40:00Z","event_type":"network_connection","source":"firewall","host":"WORKSTATION-01","destination_ip":"198.51.100.25","status":"allowed"}

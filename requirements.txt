@@ -1,0 +1,4 @@
+pytest
+PyYAML
+python-dotenv
+requests

@@ -1,0 +1,22 @@
+
+id: TL-001
+name: Repeated Failed Authentication
+description: >
+  Detects repeated failed authentication attempts
+  from the same source IP against the same account.
+
+severity: high
+
+mitre_attack:
+  tactic: Credential Access
+  technique_id: T1110
+  technique: Brute Force
+
+detection:
+  event_type: authentication
+  status: failed
+  threshold: 5
+  window_minutes: 5
+  group_by:
+    - username
+    - source_ip
