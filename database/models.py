@@ -25,6 +25,7 @@ def initialize_db(db_path=DEFAULT_DB_PATH):
 
     with get_connection(db_path) as connection:
         connection.executescript("""
+        
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -81,8 +82,83 @@ def initialize_db(db_path=DEFAULT_DB_PATH):
                 expires_at TEXT NOT NULL,
                 PRIMARY KEY (indicator, indicator_type, provider)
             );
-        """)
 
+                        CREATE TABLE IF NOT EXISTS incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fingerprint TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                severity TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open'
+                    CHECK (
+                        status IN (
+                            'open',
+                            'investigating',
+                            'resolved',
+                            'false_positive'
+                        )
+                    ),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS incident_alerts (
+                incident_id INTEGER NOT NULL,
+                alert_id INTEGER NOT NULL,
+                linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                PRIMARY KEY (incident_id, alert_id),
+
+                FOREIGN KEY (incident_id)
+                    REFERENCES incidents(id) ON DELETE CASCADE,
+
+                FOREIGN KEY (alert_id)
+                    REFERENCES alerts(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS incident_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                incident_id INTEGER NOT NULL,
+                note TEXT NOT NULL,
+                priority_score INTEGER NOT NULL DEFAULT 0,
+                priority TEXT NOT NULL DEFAULT 'low',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                FOREIGN KEY (incident_id)
+                    REFERENCES incidents(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_incident_status
+                ON incidents(status);
+
+            CREATE INDEX IF NOT EXISTS idx_incident_severity
+                ON incidents(severity);
+
+            CREATE INDEX IF NOT EXISTS idx_incident_alerts_alert_id
+                ON incident_alerts(alert_id);
+
+            CREATE INDEX IF NOT EXISTS idx_incident_notes_incident_id
+                ON incident_notes(incident_id);
+        """)
+        incident_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(incidents)"
+            ).fetchall()
+        }
+
+        if "priority_score" not in incident_columns:
+            connection.execute("""
+                ALTER TABLE incidents
+                ADD COLUMN priority_score INTEGER NOT NULL DEFAULT 0
+            """)
+
+        if "priority" not in incident_columns:
+            connection.execute("""
+                ALTER TABLE incidents
+                ADD COLUMN priority TEXT NOT NULL DEFAULT 'low'
+            """)
 
 
 def insert_events(events, db_path=DEFAULT_DB_PATH):
@@ -270,8 +346,148 @@ def get_alerts(db_path=DEFAULT_DB_PATH):
 
     return alerts
 
+def create_incident(
+    fingerprint,
+    title,
+    severity,
+    description=None,
+    db_path=DEFAULT_DB_PATH
+):
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO incidents (
+                fingerprint,
+                title,
+                description,
+                severity
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (fingerprint, title, description, severity)
+        )
 
-        
+        row = connection.execute(
+            """
+            SELECT * FROM incidents
+            WHERE fingerprint = ?
+            """,
+            (fingerprint,)
+        ).fetchone()
+
+    return dict(row)
+
+def link_alert_to_incident(
+    incident_id,
+    alert_id,
+    db_path=DEFAULT_DB_PATH
+):
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO incident_alerts (
+                incident_id,
+                alert_id
+            )
+            VALUES (?, ?)
+            """,
+            (incident_id, alert_id)
+        )
+
+def add_incident_note(
+    incident_id,
+    note,
+    db_path=DEFAULT_DB_PATH
+):
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO incident_notes (
+                incident_id,
+                note
+            )
+            VALUES (?, ?)
+            """,
+            (incident_id, note)
+        )
+
+        return cursor.lastrowid
+
+def get_incident_notes(
+    incident_id,
+    db_path=DEFAULT_DB_PATH
+):
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM incident_notes
+            WHERE incident_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (incident_id,)
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+def get_incidents(db_path=DEFAULT_DB_PATH):
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                i.*,
+                COUNT(ia.alert_id) AS alert_count
+            FROM incidents i
+            LEFT JOIN incident_alerts ia
+                ON i.id = ia.incident_id
+            GROUP BY i.id
+            ORDER BY i.created_at DESC
+            """
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+def update_incident_status(
+    incident_id,
+    new_status,
+    db_path=DEFAULT_DB_PATH
+):
+    valid_statuses = {
+        "open",
+        "investigating",
+        "resolved",
+        "false_positive"
+    }
+
+    if new_status not in valid_statuses:
+        raise ValueError(f"Invalid incident status: {new_status}")
+
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE incidents
+            SET
+                status = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                resolved_at = CASE
+                    WHEN ? IN ('resolved', 'false_positive')
+                    THEN CURRENT_TIMESTAMP
+                    ELSE NULL
+                END
+            WHERE id = ?
+            """,
+            (new_status, new_status, incident_id)
+        )
+
+        if cursor.rowcount == 0:
+            raise ValueError(f"Incident {incident_id} not found")
+
+        row = connection.execute(
+            "SELECT * FROM incidents WHERE id = ?",
+            (incident_id,)
+        ).fetchone()
+
+    return dict(row)
+
 def get_cached_enrichment(
     indicator,
     indicator_type,
@@ -341,3 +557,119 @@ def save_cached_enrichment(
                 expires_at.isoformat()
             )
         )
+
+def merge_incidents(
+    source_id,
+    target_id,
+    db_path=DEFAULT_DB_PATH
+):
+    if source_id == target_id:
+        raise ValueError("Cannot merge an incident into itself")
+
+    with get_connection(db_path) as connection:
+
+        source = connection.execute(
+            "SELECT * FROM incidents WHERE id = ?",
+            (source_id,)
+        ).fetchone()
+
+        target = connection.execute(
+            "SELECT * FROM incidents WHERE id = ?",
+            (target_id,)
+        ).fetchone()
+
+        if source is None or target is None:
+            raise ValueError("Source or target incident not found")
+
+        # Move alert relationships to the target incident.
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO incident_alerts (
+                incident_id,
+                alert_id,
+                linked_at
+            )
+            SELECT ?, alert_id, linked_at
+            FROM incident_alerts
+            WHERE incident_id = ?
+            """,
+            (target_id, source_id)
+        )
+
+        # Preserve investigation notes.
+        connection.execute(
+            """
+            INSERT INTO incident_notes (
+                incident_id,
+                note,
+                created_at
+            )
+            SELECT ?, note, created_at
+            FROM incident_notes
+            WHERE incident_id = ?
+            """,
+            (target_id, source_id)
+        )
+
+        # Keep whichever incident has the higher severity.
+        connection.execute(
+            """
+            UPDATE incidents
+            SET
+                severity = CASE
+                    WHEN
+                        CASE severity
+                            WHEN 'critical' THEN 4
+                            WHEN 'high' THEN 3
+                            WHEN 'medium' THEN 2
+                            WHEN 'low' THEN 1
+                            ELSE 0
+                        END
+                    <
+                        CASE ?
+                            WHEN 'critical' THEN 4
+                            WHEN 'high' THEN 3
+                            WHEN 'medium' THEN 2
+                            WHEN 'low' THEN 1
+                            ELSE 0
+                        END
+                    THEN ?
+                    ELSE severity
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (source["severity"], source["severity"], target_id)
+        )
+
+        # Delete the provisional incident.
+        connection.execute(
+            "DELETE FROM incidents WHERE id = ?",
+            (source_id,)
+        )
+
+        result = connection.execute(
+            "SELECT * FROM incidents WHERE id = ?",
+            (target_id,)
+        ).fetchone()
+
+    return dict(result)
+
+def get_incident_alerts(
+    incident_id,
+    db_path=DEFAULT_DB_PATH
+):
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT a.*
+            FROM alerts a
+            JOIN incident_alerts ia
+                ON a.id = ia.alert_id
+            WHERE ia.incident_id = ?
+            ORDER BY a.created_at ASC
+            """,
+            (incident_id,)
+        ).fetchall()
+
+    return [dict(row) for row in rows]

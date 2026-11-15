@@ -10,6 +10,7 @@ from database.models import (
 from detection.engine import run_detection_engine
 from enrichment.enricher import enrich_alert
 from enrichment.provider_manager import enrich_indicator
+from correlation.correlator import correlate_alert
 
 
 def get_alert_indicator(alert):
@@ -64,5 +65,12 @@ def run_detection(db_path=DEFAULT_DB_PATH):
         enriched_alerts.append(alert)
 
     save_alerts(enriched_alerts, db_path)
+
+    # Retrieve persisted alerts so each one has a database ID.
+    stored_alerts = get_alerts(db_path)
+
+    # Automatically assign alerts to incidents.
+    for alert in stored_alerts:
+        correlate_alert(alert, db_path)
 
     return get_alerts(db_path)
