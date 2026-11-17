@@ -1,0 +1,185 @@
+
+import sys
+from pathlib import Path
+from intelligence.scoring import calculate_incident_score
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+import streamlit as st
+
+from database.models import get_incidents, get_incident_alerts
+
+st.set_page_config(
+    page_title="ThreatLens",
+    page_icon="🛡️",
+    layout="wide"
+)
+
+
+def main():
+    st.title("🛡️ ThreatLens")
+    st.caption("Automated Threat Detection & Intelligence Platform")
+
+    # Retrieve incidents from SQLite
+    incidents = get_incidents()
+
+    # Dashboard metrics
+    total_incidents = len(incidents)
+
+    critical = sum(
+        incident["priority"] == "critical"
+        for incident in incidents
+    )
+
+    high = sum(
+        incident["priority"] == "high"
+        for incident in incidents
+    )
+
+    open_incidents = sum(
+        incident["status"] == "open"
+        for incident in incidents
+    )
+
+    st.subheader("Security Overview")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Total Incidents", total_incidents)
+    col2.metric("Critical Incidents", critical)
+    col3.metric("High Priority", high)
+    col4.metric("Open Incidents", open_incidents)
+
+    st.divider()
+
+    # Incident queue
+    st.subheader("Incident Queue")
+
+    if not incidents:
+        st.info("No incidents found. Run the detection pipeline first.")
+        return
+
+    # Highest-priority incidents appear first
+    sorted_incidents = sorted(
+        incidents,
+        key=lambda incident: incident["priority_score"],
+        reverse=True
+    )
+
+    incident_table = [
+        {
+            "ID": incident["id"],
+            "Title": incident["title"],
+            "Priority": incident["priority"].upper(),
+            "Score": f"{incident['priority_score']}/90",
+            "Status": incident["status"].upper(),
+            "Alerts": incident["alert_count"],
+            "Created": incident["created_at"],
+        }
+        for incident in sorted_incidents
+    ]
+
+    st.dataframe(
+        incident_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.divider()
+
+    # Incident investigation
+    st.subheader("Incident Investigation")
+
+    incident_options = {
+        f"#{incident['id']} - {incident['title']}": incident["id"]
+        for incident in sorted_incidents
+    }
+
+    selected_label = st.selectbox(
+        "Select an incident to investigate",
+        options=list(incident_options.keys())
+    )
+
+    selected_id = incident_options[selected_label]
+
+    selected_incident = next(
+        incident
+        for incident in incidents
+        if incident["id"] == selected_id
+    )
+
+    st.markdown(f"### {selected_incident['title']}")
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "Priority",
+        selected_incident["priority"].upper()
+    )
+
+    col2.metric(
+        "Risk Score",
+        f"{selected_incident['priority_score']}/90"
+    )
+
+    col3.metric(
+        "Related Alerts",
+        selected_incident["alert_count"]
+    )
+
+    st.write("**Description:**")
+    st.write(selected_incident["description"] or "No description available.")
+
+    st.write("**Status:**", selected_incident["status"].upper())
+
+    # Related alerts
+    st.markdown("### Related Alerts")
+
+    alerts = get_incident_alerts(selected_id)
+    scoring_result = calculate_incident_score(alerts)
+
+    st.markdown("### Risk Score Breakdown")
+
+    breakdown = scoring_result["breakdown"]
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Severity", f"{breakdown['severity']}/40")
+    col2.metric("Alert Volume", f"{breakdown['alert_volume']}/15")
+    col3.metric("Threat Intelligence", f"{breakdown['threat_intelligence']}/25")
+    col4.metric("MITRE ATT&CK", f"{breakdown['mitre']}/10")
+
+    st.caption(
+        f"Recalculated score: {scoring_result['score']}/90 "
+        f"| Priority: {scoring_result['priority'].upper()}"
+    )
+
+    if not alerts:
+        st.info("No alerts associated with this incident.")
+    else:
+        for alert in alerts:
+            with st.expander(
+                f"{alert['severity'].upper()} — {alert['rule_name']}"
+            ):
+                st.write("**Rule ID:**", alert["rule_id"])
+                st.write("**Description:**", alert["description"])
+                st.write("**Evidence:**")
+                st.json(alert["evidence_json"])
+
+                st.write("**Threat Intelligence:**")
+                st.json(alert["enrichment_json"])
+
+                st.write("**MITRE Tactic:**")
+                st.write(alert["mitre_tactic"] or "No tactic mapped")
+
+                st.write("**MITRE Technique:**")
+                st.write(
+                    alert["mitre_technique_id"]
+                    or "No technique mapped"
+                )
+
+    
+
+
+if __name__ == "__main__":
+    main()

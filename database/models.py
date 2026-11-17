@@ -673,3 +673,46 @@ def get_incident_alerts(
         ).fetchall()
 
     return [dict(row) for row in rows]
+def update_incident_priority(
+    incident_id,
+    priority_score,
+    priority,
+    db_path=DEFAULT_DB_PATH
+):
+    """Persist an incident's calculated score and priority."""
+
+    valid_priorities = {
+        "low",
+        "medium",
+        "high",
+        "critical"
+    }
+
+    if priority not in valid_priorities:
+        raise ValueError("Invalid incident priority")
+
+    if not isinstance(priority_score, int) or not 0 <= priority_score <= 90:
+        raise ValueError("Priority score must be between 0 and 90")
+
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE incidents
+            SET
+                priority_score = ?,
+                priority = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (priority_score, priority, incident_id)
+        )
+
+        if cursor.rowcount == 0:
+            raise ValueError(f"Incident {incident_id} does not exist")
+
+        row = connection.execute(
+            "SELECT * FROM incidents WHERE id = ?",
+            (incident_id,)
+        ).fetchone()
+
+    return dict(row)

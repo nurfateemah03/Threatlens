@@ -4,14 +4,17 @@ from database.models import (
     initialize_db,
     get_events,
     save_alerts,
-    get_alerts
+    get_alerts,
+    get_incidents,
+    get_incident_alerts,
+    update_incident_priority,
 )
 
 from detection.engine import run_detection_engine
 from enrichment.enricher import enrich_alert
 from enrichment.provider_manager import enrich_indicator
 from correlation.correlator import correlate_alert
-
+from intelligence.scoring import calculate_incident_score
 
 def get_alert_indicator(alert):
     """
@@ -69,8 +72,26 @@ def run_detection(db_path=DEFAULT_DB_PATH):
     # Retrieve persisted alerts so each one has a database ID.
     stored_alerts = get_alerts(db_path)
 
-    # Automatically assign alerts to incidents.
+    # First, correlate alerts into incidents.
     for alert in stored_alerts:
         correlate_alert(alert, db_path)
+
+    # Then calculate and persist the score for every incident.
+    incidents = get_incidents(db_path)
+
+    for incident in incidents:
+        incident_alerts = get_incident_alerts(
+            incident["id"],
+            db_path
+        )
+
+        scoring_result = calculate_incident_score(incident_alerts)
+
+        update_incident_priority(
+            incident_id=incident["id"],
+            priority_score=scoring_result["score"],
+            priority=scoring_result["priority"],
+            db_path=db_path
+        )
 
     return get_alerts(db_path)
