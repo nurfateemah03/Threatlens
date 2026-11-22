@@ -1,5 +1,5 @@
-
 import sys
+import json
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -9,10 +9,13 @@ import streamlit as st
 
 from database.models import (
     get_incidents,
+    initialize_db,
     get_incident_alerts,
+    get_alert_evidence_events,
     update_incident_status,
     add_incident_note,
-    get_incident_notes
+    get_incident_notes,
+    get_incident_timeline,
 )
 
 from intelligence.scoring import calculate_incident_score
@@ -25,14 +28,71 @@ st.set_page_config(
 )
 
 
+def display_json(value):
+    """Display JSON whether the database returned a string or object."""
+
+    if value is None:
+        st.info("No data available.")
+        return
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            st.code(value)
+            return
+
+    st.json(value)
+
+
+def display_evidence_event(event):
+    """Display the original security event behind an alert."""
+
+    st.markdown(
+        f"**Event #{event['id']} — {event['event_type']}**"
+    )
+
+    fields = [
+        ("Timestamp", event.get("timestamp")),
+        ("Source", event.get("source")),
+        ("Hostname", event.get("host")),
+        ("Username", event.get("username")),
+        ("Source IP", event.get("source_ip")),
+        ("Destination IP", event.get("destination_ip")),
+        ("Process", event.get("process")),
+        ("Command Line", event.get("command_line")),
+        ("Status", event.get("status")),
+    ]
+
+    available_fields = [
+        {"Field": name, "Observed Value": value}
+        for name, value in fields
+        if value not in (None, "")
+    ]
+
+    if available_fields:
+        st.dataframe(
+            available_fields,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with st.expander("View original raw event"):
+        display_json(event.get("raw_event"))
+
+
 def main():
+    initialize_db()
+
     st.title("🛡️ ThreatLens")
     st.caption("Automated Threat Detection & Intelligence Platform")
 
-    # Retrieve incidents from SQLite
+    # --------------------------------------------------
+    # SECURITY OVERVIEW
+    # --------------------------------------------------
+
     incidents = get_incidents()
 
-    # Dashboard metrics
     total_incidents = len(incidents)
 
     critical = sum(
@@ -61,14 +121,16 @@ def main():
 
     st.divider()
 
-    # Incident queue
+    # --------------------------------------------------
+    # INCIDENT QUEUE
+    # --------------------------------------------------
+
     st.subheader("Incident Queue")
 
     if not incidents:
         st.info("No incidents found. Run the detection pipeline first.")
         return
 
-    # Incident filtering
     st.markdown("### Filter Incidents")
 
     col1, col2, col3 = st.columns(3)
@@ -102,16 +164,15 @@ def main():
             ]
         )
 
-    # Apply priority filter
     filtered_incidents = incidents.copy()
 
     if priority_filter != "All":
         filtered_incidents = [
             incident for incident in filtered_incidents
-            if incident["priority"].lower() == priority_filter.lower()
+            if incident["priority"].lower()
+            == priority_filter.lower()
         ]
 
-    # Apply status filter
     if status_filter != "All":
         filtered_incidents = [
             incident for incident in filtered_incidents
@@ -119,7 +180,6 @@ def main():
             == status_filter.lower().replace(" ", "_")
         ]
 
-    # Apply sorting
     if sort_order == "Highest Risk First":
         filtered_incidents.sort(
             key=lambda incident: incident["priority_score"],
@@ -147,7 +207,6 @@ def main():
         f"of {len(incidents)} incidents"
     )
 
-    # Display filtered incident queue
     incident_table = [
         {
             "ID": incident["id"],
@@ -169,7 +228,10 @@ def main():
 
     st.divider()
 
-    # Incident investigation
+    # --------------------------------------------------
+    # INCIDENT SELECTION
+    # --------------------------------------------------
+
     st.subheader("Incident Investigation")
 
     if not filtered_incidents:
@@ -221,7 +283,10 @@ def main():
 
     st.write("**Status:**", selected_incident["status"].upper())
 
-    # Incident lifecycle management
+    # --------------------------------------------------
+    # INCIDENT LIFECYCLE
+    # --------------------------------------------------
+
     st.markdown("### Incident Lifecycle")
 
     valid_statuses = [
@@ -258,7 +323,10 @@ def main():
 
     st.divider()
 
-    # Analyst notes
+    # --------------------------------------------------
+    # ANALYST NOTES
+    # --------------------------------------------------
+
     st.markdown("### Analyst Notes")
 
     notes = get_incident_notes(selected_id)
@@ -281,7 +349,9 @@ def main():
             )
         )
 
-        submitted = st.form_submit_button("Save Investigation Note")
+        submitted = st.form_submit_button(
+            "Save Investigation Note"
+        )
 
         if submitted:
 
@@ -300,14 +370,63 @@ def main():
 
     st.divider()
 
-    # Related alerts
+    # --------------------------------------------------
+    # INCIDENT TIMELINE
+    # --------------------------------------------------
+
+    st.markdown("### Incident Timeline")
+
+    timeline = get_incident_timeline(selected_id)
+
+    if timeline:
+
+        for activity in timeline:
+
+            activity_type = activity["activity_type"]
+
+            if activity_type == "created":
+                icon = "🆕"
+            elif activity_type == "status_changed":
+                icon = "🔄"
+            elif activity_type == "note_added":
+                icon = "📝"
+            elif activity_type == "incident_merged":
+                icon = "🔀"
+            else:
+                icon = "📌"
+
+            with st.container(border=True):
+
+                st.write(
+                    f"{icon} **{activity_type.replace('_', ' ').title()}**"
+                )
+
+                st.caption(activity["created_at"])
+                st.write(activity["description"])
+
+    else:
+        st.info("No activity history available for this incident.")
+
+    st.divider()
+
+    # --------------------------------------------------
+    # RELATED ALERTS
+    # --------------------------------------------------
+
     st.markdown("### Related Alerts")
 
     alerts = get_incident_alerts(selected_id)
 
+    if not alerts:
+        st.info("No alerts associated with this incident.")
+        return
+
+    # --------------------------------------------------
+    # RISK SCORE BREAKDOWN
+    # --------------------------------------------------
+
     scoring_result = calculate_incident_score(alerts)
 
-    # Risk score breakdown
     st.markdown("### Risk Score Breakdown")
 
     breakdown = scoring_result["breakdown"]
@@ -316,10 +435,12 @@ def main():
 
     col1.metric("Severity", f"{breakdown['severity']}/40")
     col2.metric("Alert Volume", f"{breakdown['alert_volume']}/15")
+
     col3.metric(
         "Threat Intelligence",
         f"{breakdown['threat_intelligence']}/25"
     )
+
     col4.metric("MITRE ATT&CK", f"{breakdown['mitre']}/10")
 
     st.caption(
@@ -327,34 +448,81 @@ def main():
         f"| Priority: {scoring_result['priority'].upper()}"
     )
 
-    # Alert investigation details
-    if not alerts:
-        st.info("No alerts associated with this incident.")
+    st.divider()
 
-    else:
-        for alert in alerts:
+    # --------------------------------------------------
+    # ALERT INVESTIGATION AND ORIGINAL EVIDENCE
+    # --------------------------------------------------
 
-            with st.expander(
-                f"{alert['severity'].upper()} — {alert['rule_name']}"
-            ):
+    for alert in alerts:
 
-                st.write("**Rule ID:**", alert["rule_id"])
-                st.write("**Description:**", alert["description"])
+        with st.expander(
+            f"{alert['severity'].upper()} — "
+            f"{alert['rule_name']} (Alert #{alert['id']})"
+        ):
 
-                st.write("**Evidence:**")
-                st.json(alert["evidence_json"])
+            st.markdown("#### Detection Details")
 
-                st.write("**Threat Intelligence:**")
-                st.json(alert["enrichment_json"])
+            st.write("**Rule ID:**", alert["rule_id"])
+            st.write("**Rule Name:**", alert["rule_name"])
+            st.write("**Detection Description:**", alert["description"])
 
-                st.write("**MITRE Tactic:**")
-                st.write(alert["mitre_tactic"] or "No tactic mapped")
+            st.caption(
+                "This section describes the detection rule's conclusion, "
+                "not an independent confirmation of malicious activity."
+            )
 
-                st.write("**MITRE Technique:**")
-                st.write(
-                    alert["mitre_technique_id"]
-                    or "No technique mapped"
+            st.divider()
+
+            # Original events
+            st.markdown("#### Observed Evidence")
+
+            evidence_events = get_alert_evidence_events(alert["id"])
+
+            st.caption(
+                f"{len(evidence_events)} original event(s) retrieved "
+                f"for this alert."
+            )
+
+            if evidence_events:
+
+                for event in evidence_events:
+
+                    with st.container(border=True):
+                        display_evidence_event(event)
+
+            else:
+                st.warning(
+                    "No original event records could be retrieved "
+                    "for this alert."
                 )
+
+            st.divider()
+
+            # Threat intelligence
+            st.markdown("#### Threat Intelligence Enrichment")
+
+            display_json(alert["enrichment_json"])
+
+            st.divider()
+
+            # MITRE ATT&CK
+            st.markdown("#### MITRE ATT&CK Mapping")
+
+            st.write(
+                "**Tactic:**",
+                alert["mitre_tactic"] or "No tactic mapped"
+            )
+
+            st.write(
+                "**Technique ID:**",
+                alert["mitre_technique_id"] or "No technique mapped"
+            )
+
+            st.write(
+                "**Technique:**",
+                alert["mitre_technique"] or "No technique description"
+            )
 
 
 if __name__ == "__main__":

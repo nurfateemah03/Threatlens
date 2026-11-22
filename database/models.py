@@ -140,6 +140,19 @@ def initialize_db(db_path=DEFAULT_DB_PATH):
 
             CREATE INDEX IF NOT EXISTS idx_incident_notes_incident_id
                 ON incident_notes(incident_id);
+
+            CREATE TABLE IF NOT EXISTS incident_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                incident_id INTEGER NOT NULL,
+                activity_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                old_status TEXT,
+                new_status TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (incident_id)
+                    REFERENCES incidents(id)
+                    ON DELETE CASCADE
+);
         """)
         incident_columns = {
             row["name"]
@@ -375,7 +388,27 @@ def create_incident(
             (fingerprint,)
         ).fetchone()
 
-    return dict(row)
+        incident = dict(row)
+
+        # Record creation only when a new incident was inserted.
+        if cursor.rowcount > 0:
+            connection.execute(
+                """
+                INSERT INTO incident_history (
+                    incident_id,
+                    activity_type,
+                    description
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    incident["id"],
+                    "created",
+                    "Incident created from correlated security alerts."
+                )
+            )
+
+    return incident
 
 def link_alert_to_incident(
     incident_id,
@@ -399,7 +432,23 @@ def add_incident_note(
     note,
     db_path=DEFAULT_DB_PATH
 ):
+    if not note or not note.strip():
+        raise ValueError("Note cannot be empty")
+
     with get_connection(db_path) as connection:
+
+        # Verify that the incident exists.
+        incident = connection.execute(
+            """
+            SELECT id FROM incidents
+            WHERE id = ?
+            """,
+            (incident_id,)
+        ).fetchone()
+
+        if incident is None:
+            raise ValueError(f"Incident {incident_id} not found")
+
         cursor = connection.execute(
             """
             INSERT INTO incident_notes (
@@ -408,10 +457,29 @@ def add_incident_note(
             )
             VALUES (?, ?)
             """,
-            (incident_id, note)
+            (incident_id, note.strip())
         )
 
-        return cursor.lastrowid
+        note_id = cursor.lastrowid
+
+        # Record that an analyst added a note.
+        connection.execute(
+            """
+            INSERT INTO incident_history (
+                incident_id,
+                activity_type,
+                description
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                incident_id,
+                "note_added",
+                "An analyst added an investigation note."
+            )
+        )
+
+    return note_id
 
 def get_incident_notes(
     incident_id,
@@ -462,31 +530,69 @@ def update_incident_status(
         raise ValueError(f"Invalid incident status: {new_status}")
 
     with get_connection(db_path) as connection:
-        cursor = connection.execute(
+
+        # Retrieve the current status before updating.
+        incident = connection.execute(
             """
-            UPDATE incidents
-            SET
-                status = ?,
-                updated_at = CURRENT_TIMESTAMP,
-                resolved_at = CASE
-                    WHEN ? IN ('resolved', 'false_positive')
-                    THEN CURRENT_TIMESTAMP
-                    ELSE NULL
-                END
+            SELECT * FROM incidents
             WHERE id = ?
             """,
-            (new_status, new_status, incident_id)
-        )
-
-        if cursor.rowcount == 0:
-            raise ValueError(f"Incident {incident_id} not found")
-
-        row = connection.execute(
-            "SELECT * FROM incidents WHERE id = ?",
             (incident_id,)
         ).fetchone()
 
-    return dict(row)
+        if incident is None:
+            raise ValueError(f"Incident {incident_id} not found")
+
+        old_status = incident["status"]
+
+        # Only update and record an activity if status changed.
+        if old_status != new_status:
+
+            connection.execute(
+                """
+                UPDATE incidents
+                SET
+                    status = ?,
+                    updated_at = CURRENT_TIMESTAMP,
+                    resolved_at = CASE
+                        WHEN ? IN ('resolved', 'false_positive')
+                        THEN CURRENT_TIMESTAMP
+                        ELSE NULL
+                    END
+                WHERE id = ?
+                """,
+                (new_status, new_status, incident_id)
+            )
+
+            connection.execute(
+                """
+                INSERT INTO incident_history (
+                    incident_id,
+                    activity_type,
+                    description,
+                    old_status,
+                    new_status
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    incident_id,
+                    "status_changed",
+                    f"Incident status changed from {old_status} to {new_status}.",
+                    old_status,
+                    new_status
+                )
+            )
+
+        updated_incident = connection.execute(
+            """
+            SELECT * FROM incidents
+            WHERE id = ?
+            """,
+            (incident_id,)
+        ).fetchone()
+
+    return dict(updated_incident)
 
 def get_cached_enrichment(
     indicator,
@@ -641,6 +747,44 @@ def merge_incidents(
             """,
             (source["severity"], source["severity"], target_id)
         )
+        connection.execute(
+                """
+                INSERT INTO incident_history (
+                    incident_id,
+                    activity_type,
+                    description,
+                    old_status,
+                    new_status,
+                    created_at
+                )
+                SELECT
+                    ?,
+                    activity_type,
+                    description,
+                    old_status,
+                    new_status,
+                    created_at
+                FROM incident_history
+                WHERE incident_id = ?
+                """,
+                (target_id, source_id)
+            )
+
+        connection.execute(
+                """
+                INSERT INTO incident_history (
+                    incident_id,
+                    activity_type,
+                    description
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    target_id,
+                    "incident_merged",
+                    f"Incident #{source_id} was merged into this incident."
+                )
+            )
 
         # Delete the provisional incident.
         connection.execute(
@@ -716,3 +860,115 @@ def update_incident_priority(
         ).fetchone()
 
     return dict(row)
+
+def record_incident_activity(
+    incident_id,
+    activity_type,
+    description,
+    old_status=None,
+    new_status=None,
+    db_path=DEFAULT_DB_PATH
+):
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO incident_history (
+                incident_id,
+                activity_type,
+                description,
+                old_status,
+                new_status
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                incident_id,
+                activity_type,
+                description,
+                old_status,
+                new_status
+            )
+        )
+
+        return cursor.lastrowid
+
+
+def get_incident_timeline(
+    incident_id,
+    db_path=DEFAULT_DB_PATH
+):
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM incident_history
+            WHERE incident_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (incident_id,)
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+
+def get_alert_evidence_events(
+    alert_id,
+    db_path=DEFAULT_DB_PATH
+):
+    """Retrieve the original events associated with an alert."""
+
+    with get_connection(db_path) as connection:
+
+        alert = connection.execute(
+            """
+            SELECT evidence_json
+            FROM alerts
+            WHERE id = ?
+            """,
+            (alert_id,)
+        ).fetchone()
+
+        if alert is None:
+            return []
+
+        try:
+            evidence_ids = json.loads(
+                alert["evidence_json"] or "[]"
+            )
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+        if not evidence_ids:
+            return []
+
+        # Only use valid integer event IDs.
+        try:
+            evidence_ids = list(dict.fromkeys(
+                int(event_id) for event_id in evidence_ids
+            ))
+        except (TypeError, ValueError):
+            return []
+
+        placeholders = ",".join(
+            "?" for _ in evidence_ids
+        )
+
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM events
+            WHERE id IN ({placeholders})
+            """,
+            evidence_ids
+        ).fetchall()
+
+        events_by_id = {
+            row["id"]: dict(row)
+            for row in rows
+        }
+
+        # Preserve the original evidence order.
+        return [
+            events_by_id[event_id]
+            for event_id in evidence_ids
+            if event_id in events_by_id
+        ]
