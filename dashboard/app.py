@@ -16,8 +16,12 @@ from database.models import (
     add_incident_note,
     get_incident_notes,
     get_incident_timeline,
+    
 )
-
+from reporting.report_generator import (
+    generate_json_report,
+    generate_pdf_report,
+)
 from intelligence.scoring import calculate_incident_score
 
 
@@ -406,6 +410,46 @@ def main():
 
     else:
         st.info("No activity history available for this incident.")
+
+    st.divider()
+
+    # --------------------------------------------------
+    # INCIDENT REPORT EXPORT
+    # --------------------------------------------------
+
+    st.markdown("### Export Incident Report")
+
+    st.write(
+        "Download a structured JSON report or a formatted PDF "
+        "containing the incident investigation details."
+    )
+
+    try:
+        json_report = generate_json_report(selected_id)
+        pdf_report = generate_pdf_report(selected_id)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.download_button(
+                label="Download JSON Report",
+                data=json_report,
+                file_name=f"threatlens_incident_{selected_id}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+        with col2:
+            st.download_button(
+                label="Download PDF Report",
+                data=pdf_report,
+                file_name=f"threatlens_incident_{selected_id}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+    except Exception as error:
+        st.error(f"Could not generate incident report: {error}")
 
     st.divider()
 
