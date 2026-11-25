@@ -9,6 +9,8 @@ import streamlit as st
 
 from database.models import (
     get_incidents,
+    get_event_count,
+    get_alerts,
     initialize_db,
     get_incident_alerts,
     get_alert_evidence_events,
@@ -16,8 +18,8 @@ from database.models import (
     add_incident_note,
     get_incident_notes,
     get_incident_timeline,
-    
 )
+
 from reporting.report_generator import (
     generate_json_report,
     generate_pdf_report,
@@ -91,13 +93,17 @@ def main():
     st.title("🛡️ ThreatLens")
     st.caption("Automated Threat Detection & Intelligence Platform")
 
+    
     # --------------------------------------------------
     # SECURITY OVERVIEW
     # --------------------------------------------------
 
     incidents = get_incidents()
+    all_alerts = get_alerts()
+    total_events = get_event_count()
 
     total_incidents = len(incidents)
+    total_alerts = len(all_alerts)
 
     critical = sum(
         incident["priority"] == "critical"
@@ -118,12 +124,203 @@ def main():
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric("Total Incidents", total_incidents)
-    col2.metric("Critical Incidents", critical)
-    col3.metric("High Priority", high)
-    col4.metric("Open Incidents", open_incidents)
+    col1.metric("Events Stored", total_events)
+    col2.metric("Total Alerts", total_alerts)
+    col3.metric("Open Incidents", open_incidents)
+    col4.metric("Critical Incidents", critical)
 
     st.divider()
+
+    # --------------------------------------------------
+    # DETECTION OVERVIEW
+    # --------------------------------------------------
+
+    st.subheader("Detection Overview")
+
+    if all_alerts:
+
+        import pandas as pd
+        import plotly.express as px
+
+        alerts_df = pd.DataFrame(all_alerts)
+
+        col1, col2 = st.columns(2)
+
+        # Alerts by severity
+        with col1:
+            st.markdown("#### Alerts by Severity")
+
+            severity_counts = (
+                alerts_df["severity"]
+                .str.lower()
+                .value_counts()
+                .rename_axis("Severity")
+                .reset_index(name="Alert Count")
+            )
+
+            severity_order = [
+                "critical", "high", "medium", "low"
+            ]
+
+            severity_counts["Severity"] = pd.Categorical(
+                severity_counts["Severity"],
+                categories=severity_order,
+                ordered=True,
+            )
+
+            severity_counts = severity_counts.sort_values("Severity")
+
+            fig_severity = px.bar(
+                severity_counts,
+                x="Severity",
+                y="Alert Count",
+                color="Severity",
+                title="Distribution of Detection Alerts",
+            )
+
+            st.plotly_chart(
+                fig_severity,
+                use_container_width=True,
+            )
+
+        # Most frequently triggered rules
+        with col2:
+            st.markdown("#### Top Detection Rules")
+
+            rule_counts = (
+                alerts_df["rule_name"]
+                .value_counts()
+                .reset_index()
+            )
+
+            rule_counts.columns = ["Detection Rule", "Alert Count"]
+
+            fig_rules = px.bar(
+                rule_counts,
+                x="Alert Count",
+                y="Detection Rule",
+                orientation="h",
+                title="Most Frequently Triggered Rules",
+            )
+
+            st.plotly_chart(
+                fig_rules,
+                use_container_width=True,
+            )
+
+        # MITRE ATT&CK distribution
+        st.markdown("#### MITRE ATT&CK Techniques")
+
+        mitre_alerts = alerts_df[
+            alerts_df["mitre_technique_id"].notna()
+            & (alerts_df["mitre_technique_id"] != "")
+        ]
+
+        if not mitre_alerts.empty:
+
+            technique_counts = (
+                mitre_alerts.groupby(
+                    ["mitre_technique_id", "mitre_technique"],
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="Alert Count")
+            )
+
+            technique_counts["Technique"] = (
+                technique_counts["mitre_technique_id"]
+                + " — "
+                + technique_counts["mitre_technique"].fillna("Unknown")
+            )
+
+            fig_mitre = px.bar(
+                technique_counts,
+                x="Technique",
+                y="Alert Count",
+                title="Alerts by MITRE ATT&CK Technique",
+            )
+
+            st.plotly_chart(
+                fig_mitre,
+                use_container_width=True,
+            )
+
+        else:
+            st.info("No MITRE ATT&CK techniques are currently mapped.")
+
+    else:
+        st.info("No detection alerts available yet.")
+
+    st.divider()
+
+    # --------------------------------------------------
+    # THREAT INTELLIGENCE OVERVIEW
+    # --------------------------------------------------
+
+    st.subheader("Threat Intelligence Overview")
+
+    unique_indicators = set()
+    local_matches = 0
+    vt_success = 0
+    otx_success = 0
+    no_external_results = 0
+
+    for alert in all_alerts:
+
+        enrichment = alert.get("enrichment_json") or {}
+
+        if isinstance(enrichment, str):
+            try:
+                import json
+                enrichment = json.loads(enrichment)
+            except json.JSONDecodeError:
+                enrichment = {}
+
+        local_data = enrichment.get("local") or {}
+        external_data = enrichment.get("external") or {}
+
+        if local_data.get("indicator"):
+            unique_indicators.add(local_data["indicator"])
+
+        if external_data.get("indicator"):
+            unique_indicators.add(external_data["indicator"])
+
+        if local_data.get("matched") is True:
+            local_matches += 1
+
+        providers = external_data.get("providers") or {}
+
+        vt_status = providers.get("virustotal", {}).get("status")
+        otx_status = providers.get("otx", {}).get("status")
+
+        if vt_status == "success":
+            vt_success += 1
+
+        if otx_status == "success":
+            otx_success += 1
+
+        if vt_status != "success" and otx_status != "success":
+            no_external_results += 1
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Unique Indicators", len(unique_indicators))
+    col2.metric("Local IOC Matches", local_matches)
+    col3.metric("VirusTotal Lookups Successful", vt_success)
+    col4.metric("OTX Lookups Successful", otx_success)
+
+    st.caption(
+        f"Alerts without a successful external intelligence result: "
+        f"{no_external_results}"
+    )
+
+    if unique_indicators:
+        with st.expander("View Observed Indicators"):
+            for indicator in sorted(unique_indicators):
+                st.code(indicator)
+
+    st.divider()
+
 
     # --------------------------------------------------
     # INCIDENT QUEUE
