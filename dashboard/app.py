@@ -271,7 +271,6 @@ def main():
 
         if isinstance(enrichment, str):
             try:
-                import json
                 enrichment = json.loads(enrichment)
             except json.JSONDecodeError:
                 enrichment = {}
@@ -715,6 +714,7 @@ def main():
 
             st.divider()
 
+            
             # Original events
             st.markdown("#### Observed Evidence")
 
@@ -726,12 +726,9 @@ def main():
             )
 
             if evidence_events:
-
                 for event in evidence_events:
-
                     with st.container(border=True):
                         display_evidence_event(event)
-
             else:
                 st.warning(
                     "No original event records could be retrieved "
@@ -740,7 +737,122 @@ def main():
 
             st.divider()
 
-            # Threat intelligence
+            # Behavioural Analysis
+            enrichment = alert.get("enrichment_json") or {}
+
+            if isinstance(enrichment, str):
+                try:
+                    enrichment = json.loads(enrichment)
+                except (json.JSONDecodeError, TypeError):
+                    enrichment = {}
+
+            behavioral_context = enrichment.get(
+                "behavioral_context"
+            ) or {}
+
+            if behavioral_context:
+                st.markdown("#### Behavioural Analysis")
+
+                st.caption(
+                    "Multi-event sequence detected by TL-004"
+                )
+
+                stage_definitions = [
+                    (
+                        "repeated_failed_logins",
+                        "Repeated Failed Logins",
+                        lambda event: (
+                            event.get("event_type") == "authentication"
+                            and event.get("status") == "failed"
+                        ),
+                    ),
+                    (
+                        "successful_login",
+                        "Successful Authentication",
+                        lambda event: (
+                            event.get("event_type") == "authentication"
+                            and event.get("status") == "success"
+                        ),
+                    ),
+                    (
+                        "encoded_powershell",
+                        "Encoded PowerShell Execution",
+                        lambda event: (
+                            event.get("event_type") == "process_execution"
+                            and "powershell" in (
+                                event.get("process") or ""
+                            ).lower()
+                        ),
+                    ),
+                    (
+                        "outbound_network_connection",
+                        "Outbound Network Connection",
+                        lambda event: (
+                            event.get("event_type") == "network_connection"
+                        ),
+                    ),
+                ]
+
+                for index, (stage_key, stage_name, matcher) in enumerate(
+                    stage_definitions,
+                    start=1
+                ):
+                    st.markdown(f"**{index}. {stage_name}**")
+
+                    matching_events = [
+                        event
+                        for event in evidence_events
+                        if matcher(event)
+                    ]
+
+                    if matching_events:
+                        for event in matching_events:
+                            with st.container(border=True):
+                                st.write(
+                                    "**Timestamp:**",
+                                    event.get("timestamp", "Unavailable")
+                                )
+                                st.write(
+                                    "**Event ID:**",
+                                    event.get("id", "Unavailable")
+                                )
+                                st.write(
+                                    "**Host:**",
+                                    event.get("host", "Unavailable")
+                                )
+
+                                if event.get("source_ip"):
+                                    st.write(
+                                        "**Source IP:**",
+                                        event["source_ip"]
+                                    )
+
+                                if event.get("destination_ip"):
+                                    st.write(
+                                        "**Destination IP:**",
+                                        event["destination_ip"]
+                                    )
+
+                                if event.get("process"):
+                                    st.write(
+                                        "**Process:**",
+                                        event["process"]
+                                    )
+
+                                if event.get("command_line"):
+                                    st.code(event["command_line"])
+
+                                if event.get("status"):
+                                    st.write(
+                                        "**Status:**",
+                                        event["status"]
+                                    )
+                    else:
+                        st.caption("No matching evidence events found.")
+
+                st.divider()
+
+            # Threat Intelligence
             st.markdown("#### Threat Intelligence Enrichment")
 
             display_json(alert["enrichment_json"])
@@ -764,6 +876,7 @@ def main():
                 "**Technique:**",
                 alert["mitre_technique"] or "No technique description"
             )
+
 
 
 if __name__ == "__main__":

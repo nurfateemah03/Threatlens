@@ -2,8 +2,11 @@
 import yaml
 from pathlib import Path
 
-
 RULES_DIRECTORY = Path("detection/rules")
+
+from correlation.behavioral_correlator import (
+    find_behavioral_sequences,
+)
 
 
 def load_rule(rule_name):
@@ -194,6 +197,7 @@ def run_detection_engine(events):
 
     all_alerts = []
 
+    # Run the existing YAML-based detection rules.
     for rule_id, detector in detectors.items():
         rule = rules.get(rule_id)
 
@@ -202,5 +206,9 @@ def run_detection_engine(events):
 
         alerts = detector(events, rule)
         all_alerts.extend(alerts)
+
+    # Run multi-event behavioural correlation.
+    behavioral_alerts = find_behavioral_sequences(events)
+    all_alerts.extend(behavioral_alerts)
 
     return all_alerts

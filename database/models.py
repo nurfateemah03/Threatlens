@@ -266,6 +266,7 @@ def get_event_count(db_path=DEFAULT_DB_PATH):
     return result[0]
 
 
+
 def save_alerts(alerts, db_path):
     connection = get_connection(db_path)
 
@@ -323,8 +324,11 @@ def save_alerts(alerts, db_path):
             json.dumps(evidence),
             json.dumps({
                 "local": alert.get("threat_intelligence"),
-               "external": alert.get("external_intelligence")
-})
+                "external": alert.get("external_intelligence"),
+                "behavioral_context": alert.get(
+                    "behavioral_context"
+                ),
+            })
         ))
 
     try:

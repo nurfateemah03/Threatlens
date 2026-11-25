@@ -1,0 +1,9 @@
+
+{"timestamp":"2026-11-25T10:00:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-02","username":"analyst","source_ip":"192.0.2.55","status":"failed"}
+{"timestamp":"2026-11-25T10:01:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-02","username":"analyst","source_ip":"192.0.2.55","status":"failed"}
+{"timestamp":"2026-11-25T10:02:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-02","username":"analyst","source_ip":"192.0.2.55","status":"failed"}
+{"timestamp":"2026-11-25T10:03:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-02","username":"analyst","source_ip":"192.0.2.55","status":"failed"}
+{"timestamp":"2026-11-25T10:04:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-02","username":"analyst","source_ip":"192.0.2.55","status":"failed"}
+{"timestamp":"2026-11-25T10:05:00Z","event_type":"authentication","source":"windows","host":"WORKSTATION-02","username":"analyst","source_ip":"192.0.2.55","status":"success"}
+{"timestamp":"2026-11-25T10:08:00Z","event_type":"process_execution","source":"sysmon","host":"WORKSTATION-02","username":"analyst","process":"powershell.exe","command_line":"powershell.exe -EncodedCommand VwByAGkAdABlAC0ASABvAHMAdAAgAEgAZQBsAGwAbwA="}
+{"timestamp":"2026-11-25T10:12:00Z","event_type":"network_connection","source":"firewall","host":"WORKSTATION-02","destination_ip":"198.51.100.25","status":"allowed"}
